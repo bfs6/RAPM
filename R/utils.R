@@ -48,9 +48,9 @@ get_all_team_info <- function(season){
 }
 
 
-####GET TEAM COMMON INFO####
-get_team_common_info <- function(season, team_id){
-  team_url <- paste0("http://stats.nba.com/stats/teaminfocommon/?LeagueID=00&Season=", season, "&TeamID=", team_id)
+####GET TEAM INFO BY SEASON####
+get_team_info_by_season <- function(season){
+  player_url <- paste0("http://stats.nba.com/stats/commonallplayers/?LeagueID=00&Season=", season, "&IsOnlyCurrentSeason=1")
   headers <- c(
     `Host` = 'stats.nba.com',
     `User-Agent` = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv =72.0) Gecko/20100101 Firefox/72.0',
@@ -65,45 +65,134 @@ get_team_common_info <- function(season, team_id){
     `Cache-Control` = 'no-cache'
   )
   res <-
-    httr::GET(team_url,
+    httr::GET(player_url,
               httr::add_headers(.headers = headers))
-  team_info_json <-
+  player_info_json <-
     res$content %>%
     rawToChar() %>%
     RJSONIO::fromJSON(simplifyVector = TRUE, nullValue = NA)
-  team_info_dat <- data.frame(do.call(rbind, team_info_json$resultSets[[1]]$rowSet))
-  if(nrow(team_info_dat) == 0){
-    col_names <- team_info_json$resultSets[[1]]$headers
-    team_info_dat <- data.frame(matrix(ncol = length(col_names), nrow = 0))
-    names(team_info_dat) <- col_names
-    return(team_info_dat)
-    next
+  player_info_dat <- data.frame(do.call(rbind, player_info_json$resultSets[[1]]$rowSet))
+  if(nrow(player_info_dat) == 0){
+    col_names <- player_info_json$resultSets[[1]]$headers
+    player_info_dat <- data.frame(matrix(ncol = length(col_names), nrow = 0))
+    names(player_info_dat) <- col_names
+    return(player_info_dat)
+    break
   }
-  names(team_info_dat) <- team_info_json$resultSets[[1]]$headers
-  team_info_dat <-  
-    team_info_dat %>%
-    mutate_if(is.list, unlist)
-  Sys.sleep(0.1)
-  return(team_info_dat)
+  names(player_info_dat) <- player_info_json$resultSets[[1]]$headers
+  player_info_dat <-  
+    player_info_dat %>%
+    mutate_if(is.list, unlist) %>%
+    filter(TEAM_ID != 0) %>%
+    select(TEAM_ID, TEAM_ABBREVIATION) %>%
+    unique() %>%
+    arrange(TEAM_ABBREVIATION) %>%
+    mutate(season = season)
+  return(player_info_dat)
 }
 
 
 ####FULL TEAM INDEX####
 full_team_index <- function(){
   years = 1946:year(Sys.Date())
-  team_info <- get_all_team_info()
-  team_ids <- team_info$TEAM_ID
-  season_and_teams <- expand.grid(season = years, team_id = team_ids)
-  full_team_df <- map_df(season_and_teams[1:10,], get_team_common_info)
+  team_list <-list()
+  for(i in seq_along(years)){
+    team_list[[i]] <- get_team_info_by_season(season = years[i])
+    Sys.sleep(1)
+  }
+  team_df <- do.call(rbind, team_list)
+  full_team_df <-
+    team_df %>%
+    group_by(TEAM_ID, TEAM_ABBREVIATION) %>%
+    dplyr::summarize(season = max(season)) %>%
+    ungroup() %>%
+    distinct() %>%
+    group_by(TEAM_ID) %>%
+    arrange(TEAM_ID, -season) %>%
+    mutate(Team_Num = sprintf("%02d", 1:n()), var_type = "TEAM_ABBREVIATION") %>%
+    unite(combi, var_type, Team_Num) %>%
+    select(-c(season)) %>%
+    spread(combi, TEAM_ABBREVIATION)
   return(full_team_df)
 }
 
 
 ####GET TEAM LINEUPS####
-get_team_lineups <- function(game_id, team_id){
-  base_url <- "http://stats.nba.com/stats/commonTeamYears/"
-  team_lineup_url <- paste0(base_url, "GameID=", game_id, "&TeamID=", team_id)
+get_rosters <- function(game_id, team_id){
+  base_url <- "http://stats.nba.com/stats/boxscoreplayertrackv2/?"
+  rosters_url <- paste0(base_url, "GameID=", game_id)
+  headers <- c(
+    `Host` = 'stats.nba.com',
+    `User-Agent` = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv =72.0) Gecko/20100101 Firefox/72.0',
+    `Accept` = 'application/json, text/plain, */*',
+    `Accept-Language` = 'en-US,en;q=0.5',
+    `Accept-Encoding` = 'gzip, deflate, br',
+    `x-nba-stats-origin` = 'stats',
+    `x-nba-stats-token` = 'true',
+    `Connection` = 'keep-alive',
+    `Referer` = 'https =//stats.nba.com/',
+    `Pragma` = 'no-cache',
+    `Cache-Control` = 'no-cache'
+  )
+  res <-
+    httr::GET(rosters_url,
+              httr::add_headers(.headers = headers))
+  roster_json <-
+    res$content %>%
+    rawToChar() %>%
+    RJSONIO::fromJSON(simplifyVector = TRUE, nullValue = NA)
+  roster_df <- data.frame(do.call(rbind, roster_json$resultSets[[1]]$rowSet))
+  names(roster_df) <- roster_json$resultSets[[1]]$headers
+  roster_df <-  
+    roster_df %>%
+    mutate_if(is.list, unlist) %>%
+    filter(TEAM_ID == team_id, 
+           MIN != "0:00") %>%
+    select(c(GAME_ID, TEAM_ID, TEAM_ABBREVIATION, PLAYER_ID, PLAYER_NAME)) %>%
+    distinct()
+  return(roster_df)
 }
+
+
+
+####GET STARTERS####
+get_starters <- function(game_id, team_id){
+  base_url <- "http://stats.nba.com/stats/boxscoreplayertrackv2/?"
+  starters_url <- paste0(base_url, "GameID=", game_id)
+  headers <- c(
+    `Host` = 'stats.nba.com',
+    `User-Agent` = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv =72.0) Gecko/20100101 Firefox/72.0',
+    `Accept` = 'application/json, text/plain, */*',
+    `Accept-Language` = 'en-US,en;q=0.5',
+    `Accept-Encoding` = 'gzip, deflate, br',
+    `x-nba-stats-origin` = 'stats',
+    `x-nba-stats-token` = 'true',
+    `Connection` = 'keep-alive',
+    `Referer` = 'https =//stats.nba.com/',
+    `Pragma` = 'no-cache',
+    `Cache-Control` = 'no-cache'
+  )
+  res <-
+    httr::GET(starters_url,
+              httr::add_headers(.headers = headers))
+  starter_json <-
+    res$content %>%
+    rawToChar() %>%
+    RJSONIO::fromJSON(simplifyVector = TRUE, nullValue = NA)
+  starter_df <- data.frame(do.call(rbind, starter_json$resultSets[[1]]$rowSet))
+  names(starter_df) <- starter_json$resultSets[[1]]$headers
+  starter_df <-  
+    starter_df %>%
+    mutate_if(is.list, unlist) %>%
+    filter(TEAM_ID == team_id, 
+           MIN != "0:00") %>%
+    select(c(GAME_ID, TEAM_ID, TEAM_ABBREVIATION, PLAYER_ID, PLAYER_NAME, START_POSITION)) %>%
+    distinct() %>%
+    filter(START_POSITION != "") %>%
+    select(-c(START_POSITION))
+  return(starter_df)
+}
+
 
 ####GET JSON####
 get_json <- function(json_url){
@@ -133,12 +222,16 @@ get_json <- function(json_url){
 
 ####ORGANIZE PLAYS####
 organize_plays <- function(pbp_json){
-  team_info <- get_team_info()
-  game_id <- pbp_json$parameters
+  game_id <- pbp_json$parameters$GameID
+  if("full_team_df.csv" %in% list.files("data")){
+    full_team_df <- fread("data/full_team_df.csv", sep = ",", header = TRUE)
+  }else{
+    full_team_df <- full_team_index()
+  }
   pbp_data <- data.frame(do.call(rbind, pbp_json$resultSets[[1]]$rowSet))
   if(nrow(pbp_data) == 0){
     return(NA)
-    next
+    break
   }
   names(pbp_data) <- pbp_json$resultSets[[1]]$headers
   pbp_data <-
@@ -146,18 +239,34 @@ organize_plays <- function(pbp_json){
     mutate_if(is.list, unlist) %>%
     mutate(HomeSub = as.numeric(grepl("SUB:", pbp_data$HOMEDESCRIPTION)),
            AwaySub = as.numeric(grepl("SUB:", pbp_data$VISITORDESCRIPTION)))
-  home_team_id<- pbp_data$PLAYER1_TEAM_ID[which(pbp_data$HomeSub == 1)[1]]
+  home_team_id <- pbp_data$PLAYER1_TEAM_ID[which(pbp_data$HomeSub == 1)[1]]
   away_team_id <- pbp_data$PLAYER1_TEAM_ID[which(pbp_data$AwaySub == 1)[1]]
+  # season <- 
+  #   game_id %>%
+  #   substr(4, 5)
+  # if(substr(season, 1, 1) == "9"){
+  #   season <- as.numeric(paste0("19", season))
+  # }else{
+  #   season <- as.numeric(paste0("20", season))
+  # }
+  home_roster <- get_rosters(game_id, team_id = home_team_id)
+  away_roster <- get_rosters(game_id, team_id = away_team_id)
+  home_starters <- get_starters(game_id, team_id = home_team_id)
+  away_starters <- get_starters(game_id, team_id = away_team_id)
   
   ##Home Starters
   if(sum(pbp_data$HomeSub) > 0){
     pbp_data_home_team <- 
       pbp_data %>%
-      filter(PLAYER1_TEAM_ABBREVIATION == home_team)
-    all_home_players <- data.frame(player_name = unique(pbp_data_home_team$PLAYER1_NAME),
-                                   player_id = unique(pbp_data_home_team$PLAYER1_ID))
-    pbp_data_home_subs <- filter(pbp_data, EVENTMSGTYPE == 8, PLAYER1_TEAM_ABBREVIATION == home_team)
-    subs_1_home <- data.frame(IN = pbp_data_home_subs$PLAYER2_NAME, OUT = pbp_data_home_subs$PLAYER1_NAME)
+      filter(PLAYER1_TEAM_ID == home_team_id)
+    subs_home <- 
+      pbp_data %>%
+      filter(EVENTMSGTYPE == 8,
+             PLAYER1_TEAM_ID == home_team_id) %>%
+      select(c(IN = PLAYER2_ID, 
+               OUT = PLAYER1_ID,
+               IN_NAME = PLAYER2_NAME, 
+               OUT_NAME = PLAYER1_NAME))
     
     for(player in all_home_players$player_name){
       if(player %in% subs_1_home$IN & player %in% subs_1_home$OUT){
